@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 import httpx
+import re
 from typing import Dict, Any, AsyncGenerator
 
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -24,6 +25,8 @@ from message_processing import extract_reasoning_by_tags
 from credentials_manager import _refresh_auth
 from project_id_discovery import discover_project_id
 
+# 引入重试指标器，使手动退避重试也能实时统计并推送到面板中
+from logger import stats
 
 class FakeChatCompletionChunk:
     def __init__(self, data: Dict[str, Any]):
@@ -75,7 +78,7 @@ class ExpressClientWrapper:
                     continue
         
         if final_p_tk > 0 or final_c_tk > 0:
-            print(f"💰 [算力消耗] 提示词: {final_p_tk} | 模型思考与生成: {final_c_tk} | 总计: {final_t_tk} Tokens")
+            print(f"💰 [算力消耗统计] 提示词: {final_p_tk} | 思考与生成: {final_c_tk} | 总计: {final_t_tk} Tokens")
             
     async def _streaming_create(self, **kwargs) -> AsyncGenerator[FakeChatCompletionChunk, None]:
         endpoint = f"{self.base_url}/chat/completions"
@@ -88,16 +91,10 @@ class ExpressClientWrapper:
 
         payload["stream_options"] = {"include_usage": True}
 
-        proxies = None
+        # 完美自适应所有 httpx >= 0.25 的统一写法
+        client_args = {'timeout': 300.0}
         if app_config.PROXY_URL:
-            if app_config.PROXY_URL.startswith("socks"):
-                proxies = {"all://": app_config.PROXY_URL}
-            else:
-                proxies = {"https://": app_config.PROXY_URL}
-
-        client_args = {'timeout': 300}
-        if proxies:
-            client_args['proxies'] = proxies
+            client_args['proxy'] = app_config.PROXY_URL
         if app_config.SSL_CERT_FILE:
             client_args['verify'] = app_config.SSL_CERT_FILE
             
@@ -115,7 +112,8 @@ class ExpressClientWrapper:
                         wave_index = attempt % 4
                         round_num = (attempt // 4) + 1
                         wait_time = 2 ** wave_index
-                        print(f"⚠️ [Express Stream] 遭遇 HTTP {e.response.status_code}. 第 {round_num} 轮/第 {wave_index + 1} 次护盾激活，等待 {wait_time}s 后重试...")
+                        stats.add_retry() # 核心：将 Express 手动重试也计入面板
+                        print(f"⚠️ [API 自动重试] 上游返回短暂异常 HTTP {e.response.status_code} (Express Stream)。正在激活第 {round_num} 轮/第 {wave_index + 1} 次护盾退避，等待 {wait_time}s 后重试...")
                         await asyncio.sleep(wait_time)
                         continue
                     raise e
@@ -134,16 +132,9 @@ class ExpressClientWrapper:
         if 'extra_body' in payload:
             payload.update(payload.pop('extra_body'))
 
-        proxies = None
+        client_args = {'timeout': 300.0}
         if app_config.PROXY_URL:
-            if app_config.PROXY_URL.startswith("socks"):
-                proxies = {"all://": app_config.PROXY_URL}
-            else:
-                proxies = {"https://": app_config.PROXY_URL}
-
-        client_args = {'timeout': 300}
-        if proxies:
-            client_args['proxies'] = proxies
+            client_args['proxy'] = app_config.PROXY_URL
         if app_config.SSL_CERT_FILE:
             client_args['verify'] = app_config.SSL_CERT_FILE
             
@@ -153,13 +144,21 @@ class ExpressClientWrapper:
                 try:
                     response = await client.post(endpoint, headers=headers, params=params, json=payload, timeout=None)
                     response.raise_for_status()
-                    return FakeChatCompletion(response.json())
+                    resp_json = response.json()
+                    if isinstance(resp_json, dict) and "usage" in resp_json and resp_json["usage"]:
+                        usage = resp_json["usage"]
+                        p_tk = usage.get("prompt_tokens", 0)
+                        c_tk = usage.get("completion_tokens", 0)
+                        t_tk = usage.get("total_tokens", p_tk + c_tk)
+                        print(f"💰 [算力消耗统计] 提示词: {p_tk} | 思考与生成: {c_tk} | 总计: {t_tk} Tokens")
+                    return FakeChatCompletion(resp_json)
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code in [429, 503, 502] and attempt < max_retries - 1:
                         wave_index = attempt % 4
                         round_num = (attempt // 4) + 1
                         wait_time = 2 ** wave_index
-                        print(f"⚠️ [Express Non-Stream] 遭遇 HTTP {e.response.status_code}. 第 {round_num} 轮/第 {wave_index + 1} 次护盾激活，等待 {wait_time}s 后重试...")
+                        stats.add_retry() # 核心：手动重试计入面板
+                        print(f"⚠️ [API 自动重试] 上游返回短暂异常 HTTP {e.response.status_code} (Express Non-Stream)。正在激活第 {round_num} 轮/第 {wave_index + 1} 次护盾退避，等待 {wait_time}s 后重试...")
                         await asyncio.sleep(wait_time)
                         continue
                     raise e
@@ -170,19 +169,15 @@ class OpenAIDirectHandler:
         self.credential_manager = credential_manager
         self.express_key_manager = express_key_manager
         
+        # Vertex REST API 官方最新基准配置
         safety_threshold = "BLOCK_NONE"
-        safety_method = "PROBABILITY"
         
         self.safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": safety_threshold, "method": safety_method},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": safety_threshold, "method": safety_method},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": safety_threshold, "method": safety_method},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": safety_threshold, "method": safety_method},
-            {"category": "HARM_CATEGORY_IMAGE_HATE", "threshold": safety_threshold, "method": safety_method},
-            {"category": "HARM_CATEGORY_IMAGE_DANGEROUS_CONTENT", "threshold": safety_threshold, "method": safety_method},
-            {"category": "HARM_CATEGORY_IMAGE_HARASSMENT", "threshold": safety_threshold, "method": safety_method},
-            {"category": "HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT", "threshold": safety_threshold, "method": safety_method},
-            {"category": "HARM_CATEGORY_JAILBREAK", "threshold": safety_threshold, "method": safety_method}
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": safety_threshold},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": safety_threshold},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": safety_threshold},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": safety_threshold},
+            {"category": "HARM_CATEGORY_JAILBREAK", "threshold": safety_threshold}
         ]
 
     def create_openai_client(self, project_id: str, gcp_token: str, location: str = "global") -> openai.AsyncOpenAI:
@@ -191,16 +186,9 @@ class OpenAIDirectHandler:
             f"projects/{project_id}/locations/{location}/endpoints/openapi"
         )
         
-        proxies = None
-        if app_config.PROXY_URL:
-            if app_config.PROXY_URL.startswith("socks"):
-                proxies = {"all://": app_config.PROXY_URL}
-            else:
-                proxies = {"https://": app_config.PROXY_URL}
-
         client_args = {}
-        if proxies:
-            client_args['proxies'] = proxies
+        if app_config.PROXY_URL:
+            client_args['proxy'] = app_config.PROXY_URL
         if app_config.SSL_CERT_FILE:
             client_args['verify'] = app_config.SSL_CERT_FILE
         
@@ -218,21 +206,68 @@ class OpenAIDirectHandler:
         if is_openai_search:
             params['web_search_options'] = {}
             
+        if "max_completion_tokens" in params:
+            if "max_tokens" not in params:
+                params["max_tokens"] = params["max_completion_tokens"]
+            del params["max_completion_tokens"]
+            
         openai_params = {k: v for k, v in params.items() if v is not None}
         if "reasoning_effort" in openai_params and openai_params["reasoning_effort"] not in ["low", "medium", "high"]:
             del openai_params["reasoning_effort"]
         return openai_params
     
-    def prepare_extra_body(self) -> Dict[str, Any]:
-        # 移除了干扰性的 thoughtTagMarker，强迫其使用原生的 <think>
+    def prepare_extra_body(self, base_model_name: str, reasoning_effort: str = None) -> Dict[str, Any]:
+        google_config = {
+            "safetySettings": self.safety_settings
+        }
+        
+        is_thinking_capable = False
+        is_gemini_2_5 = False
+        is_gemini_3_or_above = False
+        
+        version_match = re.search(r'gemini-(\d+)\.(\d+)|gemini-(\d+)', base_model_name.lower())
+        if version_match:
+            groups = version_match.groups()
+            major = 0
+            minor_val = 0.0
+            
+            if groups[2]:
+                major = int(groups[2])
+            elif groups[0] and groups[1]:
+                major = int(groups[0])
+                try:
+                    minor_val = float(groups[1])
+                except ValueError:
+                    pass
+            
+            if major > 2 or (major == 2 and minor_val >= 5.0):
+                is_thinking_capable = True
+            if major == 2 and minor_val == 5.0:
+                is_gemini_2_5 = True
+            elif major >= 3:
+                is_gemini_3_or_above = True
+
+        if is_thinking_capable and "image" not in base_model_name.lower():
+            thinking_config = {"includeThoughts": True}
+            
+            if is_gemini_3_or_above:
+                if reasoning_effort == "low":
+                    thinking_config["thinkingLevel"] = "LOW"
+                elif reasoning_effort == "medium":
+                    thinking_config["thinkingLevel"] = "MEDIUM"
+                else:
+                    thinking_config["thinkingLevel"] = "HIGH"
+            elif is_gemini_2_5:
+                if reasoning_effort == "low":
+                    thinking_config["thinkingBudget"] = 1024
+                else:
+                    thinking_config["thinkingBudget"] = -1
+                    
+            google_config["thinkingConfig"] = thinking_config
+            
         return {
             "extra_body": {
-                'google': {
-                    'safetySettings': self.safety_settings,
-                    "thinkingConfig": {
-                        "includeThoughts": True
-                    }
-                }
+                "google": google_config
             }
         }
     
@@ -268,7 +303,11 @@ class OpenAIDirectHandler:
         request: OpenAIRequest
     ) -> AsyncGenerator[str, None]:
         try:
-            openai_params_for_stream = {**openai_params, "stream": True}
+            openai_params_for_stream = {
+                **openai_params, 
+                "stream": True,
+                "stream_options": {"include_usage": True}
+            }
             
             stream_response = await execute_with_retry(
                 openai_client.chat.completions.create,
@@ -285,6 +324,13 @@ class OpenAIDirectHandler:
                     if not isinstance(chunk_as_dict, dict):
                         continue
                     
+                    usage = chunk_as_dict.get('usage')
+                    if usage:
+                        p_tk = usage.get("prompt_tokens", 0)
+                        c_tk = usage.get("completion_tokens", 0)
+                        t_tk = usage.get("total_tokens", p_tk + c_tk)
+                        print(f"💰 [算力消耗统计] 提示词: {p_tk} | 思考与生成: {c_tk} | 总计: {t_tk} Tokens")
+
                     choices = chunk_as_dict.get('choices')
                     if choices and isinstance(choices, list) and len(choices) > 0:
                         delta = choices[0].get('delta')
@@ -340,7 +386,7 @@ class OpenAIDirectHandler:
                     raise
                 except Exception as chunk_error:
                     error_msg = f"Error processing OpenAI chunk for {request.model}: {str(chunk_error)}"
-                    print(f"ERROR: {error_msg}")
+                    print(f"❌ [API 错误响应] 解析流分块错误 (Model: {request.model})。错误详情: {error_msg}")
                     if len(error_msg) > 1024:
                         error_msg = error_msg[:1024] + "..."
                     error_response = create_openai_error_response(500, error_msg, "server_error")
@@ -389,7 +435,7 @@ class OpenAIDirectHandler:
             if len(error_msg) > 1024:
                 error_msg = error_msg[:1024] + "..."
             error_msg_full = f"Error during OpenAI streaming for {request.model}: {error_msg}"
-            print(f"ERROR: {error_msg_full}")
+            print(f"❌ [API 错误响应] 流处理失败 (Model: {request.model})。错误详情: {error_msg_full}")
             error_response = create_openai_error_response(500, error_msg_full, "server_error")
             yield f"data: {json.dumps(error_response)}\n\n"
             yield "data: [DONE]\n\n"             
@@ -412,6 +458,13 @@ class OpenAIDirectHandler:
             )
             response_dict = response.model_dump(exclude_unset=True, exclude_none=True)
             
+            usage = response_dict.get('usage')
+            if usage:
+                p_tk = usage.get("prompt_tokens", 0)
+                c_tk = usage.get("completion_tokens", 0)
+                t_tk = usage.get("total_tokens", p_tk + c_tk)
+                print(f"💰 [算力消耗统计] 提示词: {p_tk} | 思考与生成: {c_tk} | 总计: {t_tk} Tokens")
+
             try:
                 choices = response_dict.get('choices')
                 if choices and isinstance(choices, list) and len(choices) > 0:
@@ -424,7 +477,6 @@ class OpenAIDirectHandler:
                         actual_content = full_content if isinstance(full_content, str) else ""
                         
                         if actual_content:
-                            # 固定为提取 think 标签
                             reasoning_text, actual_content = extract_reasoning_by_tags(actual_content, "think")
                             message_dict['content'] = actual_content
                             if reasoning_text:
@@ -439,7 +491,7 @@ class OpenAIDirectHandler:
             
         except Exception as e:
             error_msg = f"Error calling OpenAI client for {request.model}: {str(e)}"
-            print(f"ERROR: {error_msg}")
+            print(f"❌ [API 错误响应] 直连上游响应失败 (Model: {request.model})。错误详情: {error_msg}")
             return JSONResponse(
                 status_code=500, 
                 content=create_openai_error_response(500, error_msg, "server_error")
@@ -480,8 +532,13 @@ class OpenAIDirectHandler:
                 client = self.create_openai_client(rotated_project_id, gcp_token)
 
             model_id = f"google/{base_model_name}"
+            
+            reasoning_effort = getattr(request, "reasoning_effort", None)
+            if not reasoning_effort and hasattr(request, "model_extra") and request.model_extra:
+                reasoning_effort = request.model_extra.get("reasoning_effort")
+                
             openai_params = self.prepare_openai_params(request, model_id, is_openai_search)
-            openai_extra_body = self.prepare_extra_body()
+            openai_extra_body = self.prepare_extra_body(base_model_name, reasoning_effort)
             
             if request.stream:
                 return await self.handle_streaming_response(
@@ -493,5 +550,5 @@ class OpenAIDirectHandler:
                 )
         except Exception as e:
             error_msg = f"Error in process_request for {request.model}: {e}"
-            print(f"ERROR: {error_msg}")
+            print(f"❌ [API 错误响应] 请求分发遇到阻断异常 (Model: {request.model})。错误详情: {error_msg}")
             return JSONResponse(status_code=500, content=create_openai_error_response(500, error_msg, "server_error"))

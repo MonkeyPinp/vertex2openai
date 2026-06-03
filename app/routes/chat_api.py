@@ -17,6 +17,7 @@ from api_helpers import (
 )
 from openai_handler import OpenAIDirectHandler
 from project_id_discovery import discover_project_id
+from vertex_ai_init import get_http_options
 
 router = APIRouter()
 
@@ -65,12 +66,71 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             
         gen_config_dict = create_generation_config(request)
 
-        # 【致命 Bug 修复】：Gemini 3 Pro Image 模型强制原生思考，它极度严苛，如果传入 thinking_config 会直接抛出 400 INVALID_ARGUMENT 崩溃！所以生图模型绝对不能传这个配置！
-        is_thinking_capable = "gemini-2.5" in base_model_name or "gemini-3" in base_model_name
+        # =============== 🧠 更加鲁棒的、面向未来的推理模型检测与代系提取 ===============
+        is_thinking_capable = False
+        is_gemini_2_5 = False
+        is_gemini_3_or_above = False
+        
+        version_match = re.search(r'gemini-(\d+)\.(\d+)|gemini-(\d+)', base_model_name.lower())
+        if version_match:
+            groups = version_match.groups()
+            major = 0
+            minor_val = 0.0
+            
+            if groups[2]:
+                major = int(groups[2])
+            elif groups[0] and groups[1]:
+                major = int(groups[0])
+                try:
+                    minor_val = float(groups[1])
+                except ValueError:
+                    pass
+            
+            if major > 2 or (major == 2 and minor_val >= 5.0):
+                is_thinking_capable = True
+                
+            if major == 2 and minor_val == 5.0:
+                is_gemini_2_5 = True
+            elif major >= 3:
+                is_gemini_3_or_above = True
+        # ==============================================================================================
+
+        # 提取客户端可能传入的推理强度参数
+        reasoning_effort = getattr(request, "reasoning_effort", None)
+        if not reasoning_effort and hasattr(request, "model_extra") and request.model_extra:
+            reasoning_effort = request.model_extra.get("reasoning_effort")
+
         if is_thinking_capable and not is_image_model:
-            if "thinking_config" not in gen_config_dict:
-                gen_config_dict["thinking_config"] = {}
-            gen_config_dict["thinking_config"]["include_thoughts"] = True
+            thinking_config = {"include_thoughts": True}
+            
+            if is_gemini_3_or_above:
+                # 【防崩溃探针优化】：
+                import google.genai
+                genai_version_str = getattr(google.genai, '__version__', '1.0.0')
+                try:
+                    parts = genai_version_str.split('.')
+                    sdk_supports_level = (int(parts[0]) >= 2) or (int(parts[0]) == 1 and int(parts[1]) >= 51)
+                except Exception:
+                    sdk_supports_level = False
+
+                if sdk_supports_level:
+                    if reasoning_effort == "low":
+                        thinking_config["thinking_level"] = "low"
+                    elif reasoning_effort == "medium":
+                        thinking_config["thinking_level"] = "medium"
+                    else:
+                        thinking_config["thinking_level"] = "high"
+                else:
+                    print(f"⚠️ [防崩溃降级机制已激活] 当前 google-genai 运行库版本 ({genai_version_str}) 过低，已自动剥离 thinking_level。请更新依赖并重新构建容器！")
+                    
+            elif is_gemini_2_5:
+                # 2.5 系列严格使用预算制
+                if reasoning_effort == "low":
+                    thinking_config["thinking_budget"] = 1024
+                else:
+                    thinking_config["thinking_budget"] = -1
+            
+            gen_config_dict["thinking_config"] = thinking_config
 
         client_to_use = None
 
@@ -91,11 +151,15 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
                             client_to_use = genai.Client(
                                 vertexai=True,
                                 api_key=key_val,
-                                http_options=types.HttpOptions(base_url=base_url)
+                                http_options=get_http_options(base_url=base_url)
                             )
                             client_to_use._api_client._http_options.api_version = None
                         else:
-                            client_to_use = genai.Client(vertexai=True, api_key=key_val)
+                            client_to_use = genai.Client(
+                                vertexai=True, 
+                                api_key=key_val, 
+                                http_options=get_http_options()
+                            )
                         break 
                     except Exception as e:
                         client_to_use = None 
@@ -110,7 +174,13 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             
             if rotated_credentials and rotated_project_id:
                 try:
-                    client_to_use = genai.Client(vertexai=True, credentials=rotated_credentials, project=rotated_project_id, location="global")
+                    client_to_use = genai.Client(
+                        vertexai=True, 
+                        credentials=rotated_credentials, 
+                        project=rotated_project_id, 
+                        location="global",
+                        http_options=get_http_options()
+                    )
                 except Exception as e:
                     return JSONResponse(status_code=500, content=create_openai_error_response(500, str(e), "server_error"))
             else: 
@@ -130,7 +200,7 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             current_prompt_func = create_gemini_prompt
 
             if is_grounded_search and not is_image_model:
-                search_tool = types.Tool(google_search=types.GoogleSearch())
+                search_tool = {"google_search": {}}
                 if "tools" in gen_config_dict and isinstance(gen_config_dict["tools"], list):
                     gen_config_dict["tools"].append(search_tool)
                 else:

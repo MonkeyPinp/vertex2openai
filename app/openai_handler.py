@@ -278,7 +278,9 @@ class OpenAIDirectHandler:
         openai_extra_body: Dict[str, Any],
         request: OpenAIRequest
     ) -> StreamingResponse:
-        if app_config.FAKE_STREAMING_ENABLED:
+        # 兼容原配置，并增加动态前缀判断
+        is_fake_enabled = app_config.FAKE_STREAMING_ENABLED or getattr(request, "is_fake_stream", False)
+        if is_fake_enabled:
             return StreamingResponse(
                 openai_fake_stream_generator(
                     openai_client=openai_client,

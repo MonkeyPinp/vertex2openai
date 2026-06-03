@@ -31,9 +31,19 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         OPENAI_SEARCH_SUFFIX = "-openaisearch"
         EXPERIMENTAL_MARKER = "-exp-"
         PAY_PREFIX = "[PAY]"
-        EXPRESS_PREFIX = "[EXPRESS] " 
+        EXPRESS_PREFIX = "[EXPRESS] "
+        FAKE_PREFIX = "[FAKE] "
         
         base_model_name = request.model 
+        
+        # 【新增逻辑】：检测并剥离 [FAKE] 前缀
+        is_fake_stream_request = False
+        if base_model_name.startswith(FAKE_PREFIX):
+            is_fake_stream_request = True
+            base_model_name = base_model_name[len(FAKE_PREFIX):]
+        
+        # 将动态控制变量挂载到 request 实例上，供下游函数读取
+        request.is_fake_stream = is_fake_stream_request
         
         is_express_model_request = False
         if base_model_name.startswith(EXPRESS_PREFIX):

@@ -669,7 +669,9 @@ async def execute_gemini_call(
     if request_obj.stream:
         is_image_request = "image" in request_obj.model.lower()
         
-        if app_config.FAKE_STREAMING_ENABLED or is_image_request:
+        # 兼容原配置，并增加动态前缀判断
+        is_fake_enabled = app_config.FAKE_STREAMING_ENABLED or getattr(request_obj, "is_fake_stream", False)
+        if is_fake_enabled or is_image_request:
             if is_image_request:
                  print("INFO: 触发生图保护机制 —— 已强制切换为假流式输出以避开 Google 报错限制！")
             return StreamingResponse(

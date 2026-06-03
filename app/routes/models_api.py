@@ -20,6 +20,8 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
     
     PAY_PREFIX = "[PAY]"
     EXPRESS_PREFIX = "[EXPRESS] "
+    # 新增 FAKE 前缀
+    FAKE_PREFIX = "[FAKE] "
     OPENAI_DIRECT_SUFFIX = "-openai"
     OPENAI_SEARCH_SUFFIX = "-openaisearch"
     
@@ -45,7 +47,8 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
         for suffix in suffixes:
             model_id_with_suffix = f"{base_id}{suffix}"
             final_id = f"{prefix}{model_id_with_suffix}" if "-exp-" not in base_id else model_id_with_suffix
-
+            
+            # 1. 注入原本的模型
             if final_id not in processed_ids:
                 final_model_list.append({
                     "id": final_id,
@@ -57,6 +60,20 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
                     "parent": None
                 })
                 processed_ids.add(final_id)
+
+            # 2. 注入带 [FAKE] 前缀的模型变体
+            fake_final_id = f"{FAKE_PREFIX}{final_id}"
+            if fake_final_id not in processed_ids:
+                final_model_list.append({
+                    "id": fake_final_id,
+                    "object": "model",
+                    "created": int(current_time),
+                    "owned_by": "google",
+                    "permission": [],
+                    "root": base_id,
+                    "parent": None
+                })
+                processed_ids.add(fake_final_id)
 
     if has_express_key:
         for model_id in raw_express_models: add_model_and_variants(model_id, EXPRESS_PREFIX)

@@ -39,7 +39,7 @@ async def fetch_and_parse_models_config() -> Optional[Dict[str, List[str]]]:
                 print(f"❌ [模型配置] 远程模型配置结构无效: {data}")
                 return None
     except httpx.RequestError as e:
-       print(f"⚠️ [模型配置] 获取远程模型配置失败，将回退到本地配置。网络错误：{e}")
+        print(f"⚠️ [模型配置] 获取远程模型配置失败，将回退到本地配置。网络错误：{e}")
         return None
     except json.JSONDecodeError as e:
         print(f"⚠️ [模型配置] 远程模型配置不是有效 JSON，将回退到本地配置。解析错误：{e}")

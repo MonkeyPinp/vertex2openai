@@ -134,7 +134,7 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         client_to_use = None
 
         if express_key_manager_instance.get_total_keys() == 0:
-            error_msg = f"❌ [密钥配置] '{request.model}' 未配置 VERTEX_EXPRESS_API_KEY，无法调用 Gemini Express Mode。
+            error_msg = f"❌ [密钥配置] '{request.model}' 未配置 VERTEX_EXPRESS_API_KEY，无法调用 Gemini Express Mode。"
             return JSONResponse(status_code=401, content=create_openai_error_response(401, error_msg, "authentication_error"))
 
         total_keys = express_key_manager_instance.get_total_keys()

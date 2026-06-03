@@ -278,7 +278,7 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
                     if parsed_ar in allowed_set:
                         target_ar = parsed_ar
                     else:
-                        print(f"WARNING: Model {request.model} does not support '{parsed_ar}'. Auto-decide triggered.")
+                        print(f"⚠️ [生图配置] 模型 {request.model} 不支持比例 {parsed_ar}，已交由 Gemini 自动选择比例。")
                         target_ar = None
                 break
                 
@@ -514,7 +514,7 @@ async def gemini_fake_stream_generator(
     is_auto_attempt: bool
 ):
     model_name_for_log = getattr(gemini_client_instance, "model_name", "unknown_gemini_model_object")
-    print(f"FAKE STREAMING (Gemini): Prep for '{request_obj.model}' (API model string: '{model_for_api_call}', client obj: '{model_name_for_log}')")
+    print(f"🌊 [假流式] 已开始调用 Gemini 模型 {model_for_api_call}，客户端请求模型名为 {request_obj.model}。")
     
     api_call_task = asyncio.create_task(
         execute_with_retry(
@@ -559,12 +559,12 @@ async def gemini_fake_stream_generator(
             yield chunk_sse
 
     except asyncio.CancelledError:
-        print(f"INFO: Client disconnected during Fake Stream (Gemini: {request_obj.model}). Cleaning up.")
+        print(f"ℹ️ [客户端断开] 假流式响应期间客户端已断开，正在清理模型 {request_obj.model} 的后台任务。")
         if "api_call_task" in locals() and not api_call_task.done():
             api_call_task.cancel()
         raise
     except Exception as e_outer_gemini:
-        err_msg_detail = f"Error in gemini_fake_stream_generator (model: '{request_obj.model}'): {type(e_outer_gemini).__name__} - {str(e_outer_gemini)}"
+        err_msg_detail = f"Gemini 假流式生成器异常（模型：{request_obj.model}）：{type(e_outer_gemini).__name__} - {str(e_outer_gemini)}"
         print(f"❌ [API 错误响应] 假流发生器运行崩溃 (Model: {request_obj.model})。错误详情: {err_msg_detail}")
         sse_err_msg_display = str(e_outer_gemini)
         if len(sse_err_msg_display) > 512: sse_err_msg_display = sse_err_msg_display[:512] + "..."
@@ -583,7 +583,8 @@ async def openai_fake_stream_generator(
     is_auto_attempt: bool
 ):
     api_model_name = openai_params.get("model", "unknown-openai-model")
-    print(f"FAKE STREAMING (OpenAI Direct): Prep for '{request_obj.model}' (API model: '{api_model_name}')")
+    print(f"🌊 [假流式 OPENAI直连] 已开始调用 Gemini 模型 {model_for_api_call}，客户端请求模型名为 {request_obj.model}。")
+    
     response_id = f"chatcmpl-openaidirectfake-{int(time.time())}"
     
     async def _openai_api_call_task():
@@ -638,7 +639,7 @@ async def openai_fake_stream_generator(
             yield chunk_sse
             
     except asyncio.CancelledError:
-        print(f"INFO: Client disconnected during Fake Stream (OpenAI: {request_obj.model}). Cleaning up.")
+        print(f"ℹ️ [客户端断开] OpenAI 直连假流响应期间客户端已断开，正在清理模型 {request_obj.model} 的后台任务。")
         if "api_call_task" in locals() and not api_call_task.done():
             api_call_task.cancel()
         raise
@@ -664,7 +665,7 @@ async def execute_gemini_call(
 ):
     actual_prompt_for_call = prompt_func(request_obj.messages)
     client_model_name_for_log = getattr(current_client, "model_name", "unknown_direct_client_object")
-    print(f"INFO: execute_gemini_call for requested API model '{model_to_call}', using client object with internal name '{client_model_name_for_log}'. Original request model: '{request_obj.model}'")
+    print(f"🚀 [上游请求] 正在调用 Gemini Express Mode 模型 {model_to_call}，客户端请求模型名为 {request_obj.model}。")
     
     if request_obj.stream:
         is_image_request = "image" in request_obj.model.lower()
@@ -673,7 +674,7 @@ async def execute_gemini_call(
         is_fake_enabled = app_config.FAKE_STREAMING_ENABLED or getattr(request_obj, "is_fake_stream", False)
         if is_fake_enabled or is_image_request:
             if is_image_request:
-                 print("INFO: 触发生图保护机制 —— 已强制切换为假流式输出以避开 Google 报错限制！")
+                 print("🖼️ [生图保护] 图片模型请求已自动切换为假流式输出，以避免上游流式限制。")
             return StreamingResponse(
                 gemini_fake_stream_generator(
                     current_client, model_to_call, actual_prompt_for_call,
@@ -710,7 +711,7 @@ async def execute_gemini_call(
                         break 
                         
                     except asyncio.CancelledError:
-                        print(f"INFO: Client disconnected during Real Stream ({model_to_call}). Clean abort.")
+                        print(f"ℹ️ [客户端断开] 真流式响应期间客户端已断开，模型 {model_to_call} 的请求已安全终止。")
                         raise
                     except Exception as e_stream_call:
                         error_str = str(e_stream_call).lower()
@@ -724,11 +725,11 @@ async def execute_gemini_call(
                             round_num = (attempt // 4) + 1
                             wait_time = 2 ** wave_index
                             stats.add_retry() # 核心：手动重试计入大盘
-                            print(f"⚠️ [API 自动重试] 遭遇 SDK 限制或算力瓶颈(Gemini SDK Stream)。正在激活第 {round_num} 轮/第 {wave_index + 1} 次退避，等待 {wait_time}s 后重试...")
+                            print(f"⚠️ [自动重试] 遭遇 SDK 限制或算力瓶颈(Gemini SDK Stream)。正在激活第 {round_num} 轮/第 {wave_index + 1} 次退避，等待 {wait_time}s 后重试...")
                             await asyncio.sleep(wait_time)
                             continue 
                             
-                        err_msg_detail_stream = f"Streaming Error (Gemini API, model string: '{model_to_call}'): {type(e_stream_call).__name__} - {str(e_stream_call)}"
+                        err_msg_detail_stream = f"Gemini 流式请求异常（模型：{model_to_call}）：{type(e_stream_call).__name__} - {str(e_stream_call)}"
                         print(f"❌ [API 错误响应] 流式连接异常中断 (Model: {model_to_call})。错误详情: {err_msg_detail_stream}")
                         s_err = str(e_stream_call); s_err = s_err[:1024]+"..." if len(s_err)>1024 else s_err
                         err_resp = create_openai_error_response(500,s_err,"server_error")
@@ -750,14 +751,14 @@ async def execute_gemini_call(
         if hasattr(response_obj_call, "prompt_feedback") and \
            hasattr(response_obj_call.prompt_feedback, "block_reason") and \
            response_obj_call.prompt_feedback.block_reason:
-            block_msg = f"Blocked (Gemini): {response_obj_call.prompt_feedback.block_reason}"
+            block_msg = f"Gemini 安全策略拦截了请求：{response_obj_call.prompt_feedback.block_reason}"
             if hasattr(response_obj_call.prompt_feedback,"block_reason_message") and \
                response_obj_call.prompt_feedback.block_reason_message: 
                 block_msg+=f" ({response_obj_call.prompt_feedback.block_reason_message})"
             raise ValueError(block_msg)
         
         if not is_gemini_response_valid(response_obj_call):
-            error_details = f"Invalid non-streaming Gemini response for model string '{model_to_call}'. "
+            error_details = f"Gemini 非流式响应无有效内容，模型：{model_to_call}。"
             if hasattr(response_obj_call, "candidates"):
                 error_details += f"Candidates: {len(response_obj_call.candidates) if response_obj_call.candidates else 0}. "
                 if response_obj_call.candidates and len(response_obj_call.candidates) > 0:

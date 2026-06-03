@@ -24,19 +24,16 @@ router = APIRouter()
 @router.post("/v1/chat/completions")
 async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api_key: str = Depends(get_api_key)):
     try:
-        credential_manager_instance = fastapi_request.app.state.credential_manager
         express_key_manager_instance = fastapi_request.app.state.express_key_manager
         
         OPENAI_DIRECT_SUFFIX = "-openai"
         OPENAI_SEARCH_SUFFIX = "-openaisearch"
         EXPERIMENTAL_MARKER = "-exp-"
-        PAY_PREFIX = "[PAY]"
-        EXPRESS_PREFIX = "[EXPRESS] "
         FAKE_PREFIX = "[FAKE] "
         
         base_model_name = request.model 
         
-        # 【新增逻辑】：检测并剥离 [FAKE] 前缀
+        # 1. 检测并剥离 [FAKE] 前缀
         is_fake_stream_request = False
         if base_model_name.startswith(FAKE_PREFIX):
             is_fake_stream_request = True
@@ -45,14 +42,6 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
         # 将动态控制变量挂载到 request 实例上，供下游函数读取
         request.is_fake_stream = is_fake_stream_request
         
-        is_express_model_request = False
-        if base_model_name.startswith(EXPRESS_PREFIX):
-            is_express_model_request = True
-            base_model_name = base_model_name[len(EXPRESS_PREFIX):]
-
-        if base_model_name.startswith(PAY_PREFIX):
-            base_model_name = base_model_name[len(PAY_PREFIX):]
-
         is_openai_direct_model = False
         is_openai_search_model = False
         
@@ -144,68 +133,47 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
 
         client_to_use = None
 
-        if is_express_model_request:
-            if express_key_manager_instance.get_total_keys() == 0:
-                error_msg = f"Model '{request.model}' requires an Express API key, but none are configured."
-                return JSONResponse(status_code=401, content=create_openai_error_response(401, error_msg, "authentication_error"))
+        if express_key_manager_instance.get_total_keys() == 0:
+            error_msg = f"❌ [密钥配置] '{request.model}' 未配置 VERTEX_EXPRESS_API_KEY，无法调用 Gemini Express Mode。
+            return JSONResponse(status_code=401, content=create_openai_error_response(401, error_msg, "authentication_error"))
 
-            total_keys = express_key_manager_instance.get_total_keys()
-            for attempt in range(total_keys):
-                key_tuple = express_key_manager_instance.get_express_api_key()
-                if key_tuple:
-                    original_idx, key_val = key_tuple
-                    try:
-                        if "gemini-2.5-pro" in base_model_name or "gemini-2.5-flash" in base_model_name:
-                            project_id = await discover_project_id(key_val)
-                            base_url = f"https://aiplatform.googleapis.com/v1/projects/{project_id}/locations/global"
-                            client_to_use = genai.Client(
-                                vertexai=True,
-                                api_key=key_val,
-                                http_options=get_http_options(base_url=base_url)
-                            )
-                            client_to_use._api_client._http_options.api_version = None
-                        else:
-                            client_to_use = genai.Client(
-                                vertexai=True, 
-                                api_key=key_val, 
-                                http_options=get_http_options()
-                            )
-                        break 
-                    except Exception as e:
-                        client_to_use = None 
-                else:
-                    client_to_use = None
-
-            if client_to_use is None: 
-                return JSONResponse(status_code=500, content=create_openai_error_response(500, "All configured Express API keys failed.", "server_error"))
-        
-        else: 
-            rotated_credentials, rotated_project_id = credential_manager_instance.get_credentials()
-            
-            if rotated_credentials and rotated_project_id:
+        total_keys = express_key_manager_instance.get_total_keys()
+        for attempt in range(total_keys):
+            key_tuple = express_key_manager_instance.get_express_api_key()
+            if key_tuple:
+                original_idx, key_val = key_tuple
                 try:
-                    client_to_use = genai.Client(
-                        vertexai=True, 
-                        credentials=rotated_credentials, 
-                        project=rotated_project_id, 
-                        location="global",
-                        http_options=get_http_options()
-                    )
+                    if "gemini-2.5-pro" in base_model_name or "gemini-2.5-flash" in base_model_name:
+                        project_id = await discover_project_id(key_val)
+                        base_url = f"https://aiplatform.googleapis.com/v1/projects/{project_id}/locations/global"
+                        client_to_use = genai.Client(
+                            vertexai=True,
+                            api_key=key_val,
+                            http_options=get_http_options(base_url=base_url)
+                        )
+                        client_to_use._api_client._http_options.api_version = None
+                    else:
+                        client_to_use = genai.Client(
+                            vertexai=True, 
+                            api_key=key_val, 
+                            http_options=get_http_options()
+                        )
+                    break 
                 except Exception as e:
-                    return JSONResponse(status_code=500, content=create_openai_error_response(500, str(e), "server_error"))
-            else: 
-                return JSONResponse(status_code=401, content=create_openai_error_response(401, "No SA credentials available.", "authentication_error"))
+                    client_to_use = None 
+            else:
+                client_to_use = None
+
+        if client_to_use is None: 
+            return JSONResponse(status_code=500, content=create_openai_error_response(500, "❌ [密钥配置] 没有可用的 Express API Key。", "server_error"))
 
         if not is_openai_direct_model and client_to_use is None:
-            return JSONResponse(status_code=500, content=create_openai_error_response(500, "Critical internal server error: Gemini client not initialized.", "server_error"))
+            return JSONResponse(status_code=500, content=create_openai_error_response(500, "❌ [服务异常] 谷处服务器炸了", "server_error"))
 
         if is_openai_direct_model:
-            if is_express_model_request:
-                openai_handler = OpenAIDirectHandler(express_key_manager=express_key_manager_instance)
-                return await openai_handler.process_request(request, base_model_name, is_express=True, is_openai_search=is_openai_search_model)
-            else:
-                openai_handler = OpenAIDirectHandler(credential_manager=credential_manager_instance)
-                return await openai_handler.process_request(request, base_model_name, is_openai_search=is_openai_search_model)
+            openai_handler = OpenAIDirectHandler(express_key_manager=express_key_manager_instance)
+            return await openai_handler.process_request(request, base_model_name, is_express=True, is_openai_search=is_openai_search_model)
+
         else: 
             current_prompt_func = create_gemini_prompt
 
@@ -219,6 +187,6 @@ async def chat_completions(fastapi_request: Request, request: OpenAIRequest, api
             return await execute_gemini_call(client_to_use, base_model_name, current_prompt_func, gen_config_dict, request)
 
     except Exception as e:
-        error_msg = f"Unexpected error in chat_completions endpoint: {str(e)}"
+        error_msg = f"❌ [服务异常] 不知道什么东西炸了: {str(e)}"
         print(error_msg)
         return JSONResponse(status_code=500, content=create_openai_error_response(500, error_msg, "server_error"))

@@ -18,26 +18,21 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
         await refresh_models_config_cache()
         _last_model_fetch_time = current_time
     
-    PAY_PREFIX = "[PAY]"
-    EXPRESS_PREFIX = "[EXPRESS] "
     # 新增 FAKE 前缀
     FAKE_PREFIX = "[FAKE] "
     OPENAI_DIRECT_SUFFIX = "-openai"
     OPENAI_SEARCH_SUFFIX = "-openaisearch"
     
-    credential_manager_instance: CredentialManager = fastapi_request.app.state.credential_manager
+    # 仅保留对 Express 密钥的校验
     express_key_manager_instance = fastapi_request.app.state.express_key_manager
 
-    has_sa_creds = credential_manager_instance.get_total_credentials() > 0
     has_express_key = express_key_manager_instance.get_total_keys() > 0
-
-    raw_vertex_models = await get_vertex_models()
     raw_express_models = await get_vertex_express_models()
     
     final_model_list: List[Dict[str, Any]] = []
     processed_ids: Set[str] = set()
 
-    def add_model_and_variants(base_id: str, prefix: str):
+    def add_model_and_variants(base_id: str):
         suffixes = [""] 
         if "gemini" in base_id.lower():
             suffixes.append(OPENAI_DIRECT_SUFFIX)
@@ -46,7 +41,8 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
 
         for suffix in suffixes:
             model_id_with_suffix = f"{base_id}{suffix}"
-            final_id = f"{prefix}{model_id_with_suffix}" if "-exp-" not in base_id else model_id_with_suffix
+            # 默认不加前缀，直接作为标准模型 ID
+            final_id = model_id_with_suffix
             
             # 1. 注入原本的模型
             if final_id not in processed_ids:
@@ -76,8 +72,6 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
                 processed_ids.add(fake_final_id)
 
     if has_express_key:
-        for model_id in raw_express_models: add_model_and_variants(model_id, EXPRESS_PREFIX)
-    if has_sa_creds:
-        for model_id in raw_vertex_models: add_model_and_variants(model_id, PAY_PREFIX)
+        for model_id in raw_express_models: add_model_and_variants(model_id)
 
     return {"object": "list", "data": sorted(final_model_list, key=lambda x: x['id'])}

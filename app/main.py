@@ -408,5 +408,9 @@ async def stream_logs_endpoint(request: Request, username: str = Depends(verify_
                 rt_logger.queues.remove(q)
     return StreamingResponse(log_generator(), media_type="text/event-stream")
 
+@app.get("/keeplive")
+async def keeplive():
+    return {"status": "healthy", "mode": "express_only"}
+
 app.include_router(models_api.router) 
 app.include_router(chat_api.router)

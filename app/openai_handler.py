@@ -499,39 +499,24 @@ class OpenAIDirectHandler:
                 content=create_openai_error_response(500, error_msg, "server_error")
             )
     
-    async def process_request(self, request: OpenAIRequest, base_model_name: str, is_express: bool = False, is_openai_search: bool = False):
-        print(f"INFO: Using OpenAI Direct Path for model: {request.model} (Express: {is_express})")
+    async def process_request(self, request: OpenAIRequest, base_model_name: str, is_express: bool = True, is_openai_search: bool = False):
+        print(f"✅ 正在使用 OpenAI 直连路径，模型：{request.model}")
         
         client: Any = None 
 
         try:
-            if is_express:
-                if not self.express_key_manager:
-                    raise Exception("Express mode requires an ExpressKeyManager, but it was not provided.")
-                
-                key_tuple = self.express_key_manager.get_express_api_key()
-                if not key_tuple:
-                    raise Exception("OpenAI Express Mode requires an API key, but none were available.")
-                
-                _, express_api_key = key_tuple
-                project_id = await discover_project_id(express_api_key)
-                
-                client = ExpressClientWrapper(project_id=project_id, api_key=express_api_key)
-                print(f"INFO: [OpenAI Express Path] Using ExpressClientWrapper for project: {project_id}")
-
-            else: 
-                if not self.credential_manager:
-                    raise Exception("Standard OpenAI Direct mode requires a CredentialManager.")
-
-                rotated_credentials, rotated_project_id = self.credential_manager.get_credentials()
-                if not rotated_credentials or not rotated_project_id:
-                    raise Exception("OpenAI Direct Mode requires GCP credentials, but none were available.")
-
-                print(f"INFO: [OpenAI Direct Path] Using credentials for project: {rotated_project_id}")
-                gcp_token = _refresh_auth(rotated_credentials)
-                if not gcp_token:
-                    raise Exception(f"Failed to obtain valid GCP token for OpenAI client (Project: {rotated_project_id}).")
-                client = self.create_openai_client(rotated_project_id, gcp_token)
+            if not self.express_key_manager:
+                raise Exception("Express 模式需要 ExpressKeyManager，但未提供该管理器。")
+            
+            key_tuple = self.express_key_manager.get_express_api_key()
+            if not key_tuple:
+                raise Exception("OpenAI 快速模式需要 API 密钥，但当前没有可用的密钥。")
+            
+            _, express_api_key = key_tuple
+            project_id = await discover_project_id(express_api_key)
+            
+            client = ExpressClientWrapper(project_id=project_id, api_key=express_api_key)
+            print(f"INFO: [OpenAI Express Path] Using ExpressClientWrapper for project: {project_id}")
 
             model_id = f"google/{base_model_name}"
             

@@ -11,7 +11,7 @@ async def discover_project_id(api_key: str) -> str:
     通过 httpx 发现项目 ID，采用全版本兼容的 proxy 参数
     """
     if api_key in PROJECT_ID_CACHE:
-        print(f"INFO: 使用缓存的项目 ID: {PROJECT_ID_CACHE[api_key]}")
+        print(f"✅ [项目获取] 使用缓存的项目 ID: {PROJECT_ID_CACHE[api_key]}")
         return PROJECT_ID_CACHE[api_key]
     
     error_url = "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.7-pro-preview-05-06:streamGenerateContent"
@@ -41,18 +41,18 @@ async def discover_project_id(api_key: str) -> str:
                     if match:
                         project_id = match.group(1)
                         PROJECT_ID_CACHE[api_key] = project_id
-                        print(f"INFO: 成功发现项目 ID: {project_id}")
+                        print(f"✅ [项目获取] 成功发现项目 ID: {project_id}")
                         return project_id
             except json.JSONDecodeError:
                 match = re.search(r'projects/(\d+)/locations/', response_text)
                 if match:
                     project_id = match.group(1)
                     PROJECT_ID_CACHE[api_key] = project_id
-                    print(f"INFO: 从原始响应文本中发现项目 ID: {project_id}")
+                    print(f"✅ [项目获取] 从原始响应文本中发现项目 ID: {project_id}")
                     return project_id
             
-            raise Exception(f"未能发现项目 ID。状态码: {response.status_code}, 响应: {response_text[:500]}")
+            raise Exception(f"❌ [项目获取失败] 未能发现项目 ID。状态码: {response.status_code}, 响应: {response_text[:500]}")
             
         except Exception as e:
-            print(f"ERROR: 发现项目 ID 失败 (本地网络/证书/代理可能存在限制): {e}")
+            print(f"❌ [项目获取失败] 发现项目 ID 失败 (本地网络/证书/代理可能存在限制): {e}")
             raise

@@ -19,6 +19,34 @@ import config
 
 express_key_manager = ExpressKeyManager()
 
+# ➕ 新增：后台定时 GET 请求任务
+async def periodic_get_task():
+    target_url = config.CRON_GET_URL
+    if not target_url:
+        print("❌ [定时任务] 未配置 CRON_GET_URL，周期性 GET 任务已跳过。")
+        return
+
+    print(f"✅ [定时任务] 周期性 GET 任务已启动，目标: {target_url}")
+    
+    # 使用异步 httpx 客户端
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while True:
+            try:
+                # 触发 GET 请求
+                response = await client.get(target_url)
+                print(f"⏰ [定时任务] 成功向 {target_url} 发起请求，状态码: {response.status_code}")
+            except httpx.RequestError as exc:
+                print(f"⚠️ [定时任务] 向 {target_url} 发起请求时发生异常: {exc}")
+            except asyncio.CancelledError:
+                # 响应服务关闭信号，优雅退出
+                print("✅ [定时任务] 正在取消……")
+                break
+            except Exception as e:
+                print(f"❌ [定时任务] 未知错误: {e}")
+            
+            # 异步睡眠 5 分钟 (5 * 60 秒)
+            await asyncio.sleep(300)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 异步启动生命周期：尝试异步预热模型列表缓存
@@ -32,7 +60,17 @@ async def lifespan(app: FastAPI):
         await refresh_models_config_cache()
     except Exception as e:
         print(f"⚠️ [服务启动] 预热模型配置缓存失败： {e}.")
-    yield
+    # 2. ➕ 启动后台定时请求任务（将其注册进 asyncio 事件循环）
+    cron_task = asyncio.create_task(periodic_get_task())
+    
+    yield 
+    
+    # 3. ➕ 服务关闭时，取消后台任务，防止内存泄露
+    cron_task.cancel()
+    try:
+        await cron_task
+    except asyncio.CancelledError:
+        print("✅ [定时任务] 已停止")
 
 app = FastAPI(title="OpenAI to Gemini Adapter", lifespan=lifespan)
 

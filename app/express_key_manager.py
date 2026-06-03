@@ -4,10 +4,7 @@ import config as app_config
 
 
 class ExpressKeyManager:
-    """
-    Manager for Vertex Express API keys with support for both random and round-robin selection strategies.
-    Similar to CredentialManager but specifically for Express API keys.
-    """
+    """管理 Vertex AI Express Mode API Key，支持随机或轮询选择。"""
     
     def __init__(self):
         """Initialize the Express Key Manager with API keys from config."""
@@ -24,10 +21,9 @@ class ExpressKeyManager:
         Returns (original_index, key) tuple or None if no keys available.
         """
         if not self.express_keys:
-            print("WARNING: No Express API keys available for selection.")
+            print("❌ [密钥配置] 未配置 VERTEX_EXPRESS_API_KEY，无法调用 Gemini Express Mode。")
             return None
             
-        print(f"DEBUG: Using random Express API key selection strategy.")
         
         # Create list of indexed keys
         indexed_keys = list(enumerate(self.express_keys))
@@ -36,6 +32,7 @@ class ExpressKeyManager:
         
         # Return the first key (which is random due to shuffle)
         original_idx, key = indexed_keys[0]
+        print(f"🔑 [密钥选择] 已随机选择第 {original_idx + 1} 个 Express API Key。")
         return (original_idx, key)
     
     def get_roundrobin_express_key(self) -> Optional[Tuple[int, str]]:
@@ -44,10 +41,9 @@ class ExpressKeyManager:
         Returns (original_index, key) tuple or None if no keys available.
         """
         if not self.express_keys:
-            print("WARNING: No Express API keys available for selection.")
+            print("❌ [密钥配置] 未配置 VERTEX_EXPRESS_API_KEY，无法调用 Gemini Express Mode。")
             return None
             
-        print(f"DEBUG: Using round-robin Express API key selection strategy.")
         
         # Ensure round_robin_index is within bounds
         if self.round_robin_index >= len(self.express_keys):
@@ -59,7 +55,7 @@ class ExpressKeyManager:
         
         # Move to next index for next call
         self.round_robin_index = (self.round_robin_index + 1) % len(self.express_keys)
-        
+        print(f"🔑 [密钥选择] 已按轮询策略选择第 {original_idx + 1} 个 Express API Key。")
         return (original_idx, key)
     
     def get_express_api_key(self) -> Optional[Tuple[int, str]]:
@@ -90,4 +86,4 @@ class ExpressKeyManager:
         # Reset round-robin index if keys changed
         if self.round_robin_index >= len(self.express_keys):
             self.round_robin_index = 0
-        print(f"INFO: Express API keys refreshed. Total keys: {self.get_total_keys()}")
+        print(f"🔄 [密钥刷新] 已重新加载 {len(self.express_keys)} 个 Express API Key。")

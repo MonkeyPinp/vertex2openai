@@ -14,6 +14,7 @@ class AppSettings(BaseSettings):
     SAFETY_SCORE: bool = False
     PROXY_URL: Optional[str] = None
     SSL_CERT_FILE: Optional[str] = None
+    CRON_GET_URL: Optional[str] = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -36,5 +37,6 @@ ROUNDROBIN = _settings.ROUNDROBIN
 SAFETY_SCORE = _settings.SAFETY_SCORE
 PROXY_URL = _settings.PROXY_URL
 SSL_CERT_FILE = _settings.SSL_CERT_FILE
+CRON_GET_URL = _settings.CRON_GET_URL
 
 VERTEX_REASONING_TAG = "vertex_think_tag"

@@ -4,6 +4,7 @@ import asyncio
 import re
 import threading
 from typing import List
+from collections import deque
 
 original_print = builtins.print
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
@@ -18,14 +19,39 @@ class ProxyStats:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.lock = threading.Lock()
+        self.history_records = deque(maxlen=200)
 
     def increment_total(self):
         with self.lock:
             self.total_requests += 1
 
+    # ------ 新增：添加基础请求记录 ------
+    def add_history_record(self, model: str, status_code: int):
+        with self.lock:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.history_records.appendleft({
+                "time": timestamp,
+                "model": model,
+                "status_code": status_code,
+                "prompt_tokens": 0,
+                "completion_tokens": 0
+            })
+
+    # ------ 新增：异步更新最新一条未填充 Token 记录的方法 ------
+    def update_latest_tokens(self, p_tokens: int, c_tokens: int):
+        with self.lock:
+            # 遍历寻找最近一条尚未分配 Token 且模型匹配的记录进行绑定
+            for record in self.history_records:
+                if record["prompt_tokens"] == 0 and record["completion_tokens"] == 0:
+                    record["prompt_tokens"] = p_tokens
+                    record["completion_tokens"] = c_tokens
+                    break
+
     def add_error(self):
         with self.lock:
             self.error_requests += 1
+            if self.history_records:
+                self.history_records[0]["status_code"] = 500
 
     def add_request(self, success=True, is_error=False):
         # 保持旧接口向下兼容，防止其他文件关联报错
@@ -43,9 +69,12 @@ class ProxyStats:
             self.completion_tokens += c_tokens
             # 只有当实际成功返回并捕获到 Token 时，才将该请求计入“成功响应”
             self.success_requests += 1
+        self.update_latest_tokens(p_tokens, c_tokens)
 
     def get_json_stats(self):
         """向前端面板提供实时数据"""
+        with self.lock: # 加上锁保证读取队列时线程安全
+            records_list = list(self.history_records)
         return {
             "uptime": round(time.time() - self.start_time, 2),
             "total": self.total_requests,

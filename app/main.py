@@ -52,32 +52,13 @@ app.state.express_key_manager = express_key_manager
 async def stats_tracker_middleware(request: Request, call_next):
     if "chat/completions" in request.url.path:
         stats.increment_total()  # 进站时：增加总请求计数
-        # ------ 新增：尝试提前捕获客户端请求的模型名称 ------
-        requested_model = "unknown"
-        try:
-            # 仅读取 body 不消耗掉它，防止下游 FastAPI 接收不到
-            body_bytes = await request.body()
-            if body_bytes:
-                import json
-                body_json = json.loads(body_bytes.decode("utf-8"))
-                requested_model = body_json.get("model", "unknown")
-            
-            # 重新构造 request 防止由于读取 body 造成挂起
-            async def receive():
-                return {"type": "http.request", "body": body_bytes, "more_body": False}
-            request._receive = receive
-        except Exception:
-            pass
-
         try:
             response = await call_next(request)
             if response.status_code >= 400:
                 stats.add_error()  # 出站时：如果是异常状态码，登记错误响应
-            stats.add_history_record(requested_model, response.status_code)
             return response
         except Exception as e:
             stats.add_error()  # 出站时：如果执行崩溃，登记错误响应
-            stats.add_history_record(requested_model, 500)
             raise e
     return await call_next(request)
 
@@ -136,10 +117,6 @@ DASHBOARD_HTML = """
             <div onclick="switchTab('dashboard')" id="nav-dashboard" class="nav-item active px-4 py-3 md:px-6 md:py-3.5 flex items-center gap-2.5 whitespace-nowrap text-sm md:text-base">
                 <svg class="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
                 数据大盘
-            </div>
-            <div onclick="switchTab('history')" id="nav-history" class="nav-item px-4 py-3 md:px-6 md:py-3.5 flex items-center gap-2.5 whitespace-nowrap text-sm md:text-base">
-                <svg class="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
-                使用记录
             </div>
             <div onclick="switchTab('logs')" id="nav-logs" class="nav-item px-4 py-3 md:px-6 md:py-3.5 flex items-center gap-2.5 whitespace-nowrap text-sm md:text-base">
                 <svg class="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
@@ -229,25 +206,6 @@ DASHBOARD_HTML = """
                 </div>
             </div>
 
-            <div id="view-history" class="hidden max-w-6xl mx-auto glass-panel rounded-2xl overflow-hidden">
-                <div class="overflow-x-auto">
-                    <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
-                        <thead class="bg-slate-50 font-semibold text-slate-700">
-                            <tr>
-                                <th class="px-6 py-4">时间</th>
-                                <th class="px-6 py-4">模型</th>
-                                <th class="px-6 py-4">状态</th>
-                                <th class="px-6 py-4">输入</th>
-                                <th class="px-6 py-4">输出</th>
-                                <th class="px-6 py-4">合计</th>
-                            </tr>
-                        </thead>
-                        <tbody id="history-table-body" class="divide-y divide-slate-200 text-slate-600 bg-white">
-                            </tbody>
-                    </table>
-                </div>
-            </div>
-            
             <!-- 视图 2：运行日志终端 (浅色轻量版) -->
             <div id="view-logs" class="hidden h-full max-w-6xl mx-auto flex flex-col glass-panel rounded-2xl overflow-hidden">
                 <div class="bg-white px-4 py-3 border-b border-slate-200 flex items-center gap-2.5">
@@ -275,11 +233,9 @@ DASHBOARD_HTML = """
             
             document.getElementById('view-dashboard').classList.add('hidden');
             document.getElementById('view-logs').classList.add('hidden');
-            document.getElementById('view-history').classList.add('hidden');
             document.getElementById('view-' + tabId).classList.remove('hidden');
             
-            const titles = {'dashboard': '数据大盘', 'logs': '运行日志', 'history': '使用记录'};
-            document.getElementById('page-title').innerText = titles[tabId] || '管理控制台';
+            document.getElementById('page-title').innerText = tabId === 'dashboard' ? '数据大盘' : '运行日志';
         }
 
         function renderChart(success, error, retries) {
@@ -328,29 +284,6 @@ DASHBOARD_HTML = """
                 document.getElementById('stat-total-tokens').innerText = formatNumber(data.prompt_tokens + data.completion_tokens);
                 
                 renderChart(data.success, data.error, data.retries);
-                
-                const tableBody = document.getElementById('history-table-body');
-                if (tableBody && data.records) {
-                    if (data.records.length === 0) {
-                        tableBody.innerHTML = `<tr><td colspan="6" class="px-6 py-8 text-center text-slate-400">暂无近期使用数据</td></tr>`;
-                    } else {
-                        tableBody.innerHTML = data.records.map(r => {
-                            const isErr = r.status_code >= 400;
-                            const badgeColor = isErr ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200';
-                            const totalT = r.prompt_tokens + r.completion_tokens;
-                            return `
-                                <tr class="hover:bg-slate-50/80 transition-colors">
-                                    <td class="px-6 py-3.5 font-mono text-xs text-slate-500">${r.time}</td>
-                                    <td class="px-6 py-3.5 font-medium text-slate-800">${r.model}</td>
-                                    <td class="px-6 py-3.5"><span class="px-2.5 py-0.5 rounded-full text-xs font-semibold border ${badgeColor}">${r.status_code}</span></td>
-                                    <td class="px-6 py-3.5 font-mono text-xs">${r.prompt_tokens ? formatNumber(r.prompt_tokens) : '-'}</td>
-                                    <td class="px-6 py-3.5 font-mono text-xs">${r.completion_tokens ? formatNumber(r.completion_tokens) : '-'}</td>
-                                    <td class="px-6 py-3.5 font-mono text-xs font-semibold text-slate-700">${totalT ? formatNumber(totalT) : '-'}</td>
-                                </tr>
-                            `;
-                        }).join('');
-                    }
-                }
             } catch (e) {
                 console.error("Fetch stats failed", e);
             }

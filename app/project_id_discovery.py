@@ -8,10 +8,10 @@ PROJECT_ID_CACHE: Dict[str, str] = {}
 
 async def discover_project_id(api_key: str) -> str:
     """
-    Í¨¹ı httpx ·¢ÏÖÏîÄ¿ ID£¬²ÉÓÃÈ«°æ±¾¼æÈİµÄ proxy ²ÎÊı
+    é€šè¿‡ httpx å‘ç°é¡¹ç›® IDï¼Œé‡‡ç”¨å…¨ç‰ˆæœ¬å…¼å®¹çš„ proxy å‚æ•°
     """
     if api_key in PROJECT_ID_CACHE:
-        print(f"INFO: Ê¹ÓÃ»º´æµÄÏîÄ¿ ID: {PROJECT_ID_CACHE[api_key]}")
+        print(f"INFO: ä½¿ç”¨ç¼“å­˜çš„é¡¹ç›® ID: {PROJECT_ID_CACHE[api_key]}")
         return PROJECT_ID_CACHE[api_key]
     
     error_url = "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.7-pro-preview-05-06:streamGenerateContent"
@@ -41,18 +41,18 @@ async def discover_project_id(api_key: str) -> str:
                     if match:
                         project_id = match.group(1)
                         PROJECT_ID_CACHE[api_key] = project_id
-                        print(f"INFO: ³É¹¦·¢ÏÖÏîÄ¿ ID: {project_id}")
+                        print(f"INFO: æˆåŠŸå‘ç°é¡¹ç›® ID: {project_id}")
                         return project_id
             except json.JSONDecodeError:
                 match = re.search(r'projects/(\d+)/locations/', response_text)
                 if match:
                     project_id = match.group(1)
                     PROJECT_ID_CACHE[api_key] = project_id
-                    print(f"INFO: ´ÓÔ­Ê¼ÏìÓ¦ÎÄ±¾ÖĞ·¢ÏÖÏîÄ¿ ID: {project_id}")
+                    print(f"INFO: ä»åŸå§‹å“åº”æ–‡æœ¬ä¸­å‘ç°é¡¹ç›® ID: {project_id}")
                     return project_id
             
-            raise Exception(f"Î´ÄÜ·¢ÏÖÏîÄ¿ ID¡£×´Ì¬Âë: {response.status_code}, ÏìÓ¦: {response_text[:500]}")
+            raise Exception(f"æœªèƒ½å‘ç°é¡¹ç›® IDã€‚çŠ¶æ€ç : {response.status_code}, å“åº”: {response_text[:500]}")
             
         except Exception as e:
-            print(f"ERROR: ·¢ÏÖÏîÄ¿ ID Ê§°Ü (±¾µØÍøÂç/Ö¤Êé/´úÀí¿ÉÄÜ´æÔÚÏŞÖÆ): {e}")
+            print(f"ERROR: å‘ç°é¡¹ç›® ID å¤±è´¥ (æœ¬åœ°ç½‘ç»œ/è¯ä¹¦/ä»£ç†å¯èƒ½å­˜åœ¨é™åˆ¶): {e}")
             raise

@@ -25,7 +25,7 @@ class OpenAIRequest(BaseModel):
     messages: list[OpenAIMessage]
     temperature: float | None = 1.0
     max_tokens: int | None = None
-    max_completion_tokens: int | None = None  # ¼æÈİ×îĞÂ°æ OpenAI ¿Í»§¶Ë
+    max_completion_tokens: int | None = None  # å…¼å®¹æœ€æ–°ç‰ˆ OpenAI å®¢æˆ·ç«¯
     top_p: float | None = 1.0
     top_k: int | None = None
     stream: bool | None = False
@@ -35,7 +35,7 @@ class OpenAIRequest(BaseModel):
     seed: int | None = None
     logprobs: int | None = None
     response_logprobs: bool | None = None
-    response_format: dict[str, Any] | None = None # ¼æÈİÇ¿ÖÆ JSON ¸ñÊ½»¯Êä³ö
+    response_format: dict[str, Any] | None = None # å…¼å®¹å¼ºåˆ¶ JSON æ ¼å¼åŒ–è¾“å‡º
     n: int | None = None 
     tools: list[dict[str, Any]] | None = None
     tool_choice: str | dict[str, Any] | None = None

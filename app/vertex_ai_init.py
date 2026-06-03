@@ -8,7 +8,7 @@ from model_loader import refresh_models_config_cache
 
 def get_http_options(base_url: Optional[str] = None) -> Optional[types.HttpOptions]:
     """
-    »ñÈ¡°üº¬´úÀíºÍ»ù´¡URLµÄHttpOptionsÅäÖÃ£¬²ÉÓÃ httpx È«°æ±¾Í¨ÓÃµÄµ¥Êý proxy ²ÎÊý
+    èŽ·å–åŒ…å«ä»£ç†å’ŒåŸºç¡€URLçš„HttpOptionsé…ç½®ï¼Œé‡‡ç”¨ httpx å…¨ç‰ˆæœ¬é€šç”¨çš„å•æ•° proxy å‚æ•°
     """
     client_args = {}
     if app_config.PROXY_URL:

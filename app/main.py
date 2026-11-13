@@ -4,6 +4,7 @@ import os
 import secrets
 import threading
 import time
+import urllib.request
 from typing import Optional
 from fastapi import FastAPI, Depends, Request, HTTPException, Response
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
@@ -23,6 +24,31 @@ from model_loader import get_express_models
 from cookie_auth import validate_cookie
 import express_key_probe
 from resumable import resumable_store
+
+# ================= 新增：定义 IP 变量与探测函数 =================
+SERVER_OUTBOUND_IP = "获取中..."
+
+def _fetch_outbound_ip():
+    """后台轻量探测当前服务器向外发起请求时的公网 IP"""
+    global SERVER_OUTBOUND_IP
+    services = [
+        "https://icanhazip.com",
+        "https://ifconfig.me/ip",
+    ]
+    for url in services:
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "curl/7.68.0"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    ip = resp.read().decode("utf-8").strip()
+                    SERVER_OUTBOUND_IP = ip
+                    print(f"🌐 [网络探测] 本服务器公网出口 IP 为: {ip}")
+                    return
+        except Exception:
+            continue
+    SERVER_OUTBOUND_IP = "获取失败"
 
 express_key_manager = ExpressKeyManager()
 
@@ -45,6 +71,9 @@ async def _probe_express_projects_on_startup() -> None:
 async def lifespan(app: FastAPI):
     from model_loader import refresh_models_config_cache
     print("🚀 [服务启动] agentplatform2api 适配器已启动（Express API Key / Cookie 直连 双通道）。")
+    # ========= 加上这一行：让后台线程去静默查 IP =========
+    threading.Thread(target=_fetch_outbound_ip, daemon=True).start()
+    # ==================================================
 
     if config.API_KEY == DEFAULT_API_KEY:
         public_host = any(os.environ.get(k) for k in ("SPACE_ID", "SPACE_HOST", "HF_SPACE_ID"))
@@ -485,6 +514,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="flex items-center gap-1.5 sm:gap-2 flex-wrap">
       <span class="pill pill-accent" id="mode-pill">通道 —</span>
+      <span class="pill pill-accent" id="server-ip-pill" title="当前服务器公网出口 IP">🌐 出口 IP: 获取中...</span>
       <span class="pill pill-mint"><span class="relative flex h-2 w-2"><span class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style="background:#5fd3bc"></span><span class="relative inline-flex rounded-full h-2 w-2" style="background:#2eb89e"></span></span><span id="uptime">运行中</span></span>
       <button onclick="copyEndpoint()" class="pill hover:opacity-85" style="cursor:pointer" title="点击复制 OpenAI 兼容接口地址（/v1）">🔗 复制 /v1</button>
       <div class="theme-seg" title="切换日间马卡龙 / 夜间护眼模式">
@@ -1161,6 +1191,16 @@ async function fetchStats(){
     renderChart(d.success||0, d.error||0, d.retries||0);
   }catch(e){}
 }
+async function fetchServerIp(){
+  try {
+    var res = await (await fetch('/api/server-ip')).json();
+    var el = $('server-ip-pill');
+    if(el && res.ip){
+      el.textContent = '🌐 ' + res.ip;
+    }
+  } catch(e){}
+}
+
 
 function applyChannelHighlight(m){
   var isWeb = (m==='web_proxy');
@@ -1662,7 +1702,7 @@ try{
 $('project-input').addEventListener('input',function(e){ var v=e.target.value.trim(); var m=v.match(/[?&]project=([^&]+)/)||v.match(/\/projects\/([^\/]+)/); if(m) e.target.value=m[1]; });
 $('image_aspect_ratio').addEventListener('change', function(e){ curAR=e.target.value; });
 
-fetchStats(); setInterval(fetchStats,3000); loadRuntime(); loadParams(); loadExpressKeys();
+fetchStats(); setInterval(fetchStats,3000); loadRuntime(); loadParams(); loadExpressKeys(); fetchServerIp();
 </script>
 </body>
 </html>
@@ -1726,6 +1766,9 @@ async def logout(request: Request):
 async def get_stats_api(_auth: bool = Depends(require_auth)):
     return JSONResponse(content=stats.get_json_stats())
 
+@app.get("/api/server-ip")
+async def get_server_ip_api(_auth: bool = Depends(require_auth)):
+    return JSONResponse(content={"ip": SERVER_OUTBOUND_IP})
 
 class ModeSetting(BaseModel):
     mode: str

@@ -50,6 +50,41 @@ def _fetch_outbound_ip():
             continue
     SERVER_OUTBOUND_IP = "获取失败"
 
+KEEPALIVE_CONFIG = {
+    "enabled": False,
+    "url": "",
+    "interval": 300,  # 默认 5 分钟 (300秒)
+}
+
+
+async def _keepalive_loop():
+    """后台定时向自身公网域名发送 GET 请求以防 Render 休眠"""
+    while True:
+        try:
+            if KEEPALIVE_CONFIG.get("enabled") and KEEPALIVE_CONFIG.get("url"):
+                target_url = KEEPALIVE_CONFIG["url"].strip()
+                if target_url.startswith("http://") or target_url.startswith(
+                    "https://"
+                ):
+                    try:
+                        req = urllib.request.Request(
+                            target_url,
+                            headers={"User-Agent": "Render-KeepAlive/1.0"},
+                        )
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            pass
+                    except Exception as req_err:
+                        # 只要请求打到了 Render 网关就算保活成功，即使返回 401/404 也没关系
+                        pass
+            interval = max(60, int(KEEPALIVE_CONFIG.get("interval", 300)))
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(60)
+
+
+
 express_key_manager = ExpressKeyManager()
 
 
@@ -96,10 +131,11 @@ async def lifespan(app: FastAPI):
 
     _probe_task = asyncio.create_task(_probe_express_projects_on_startup())
     _sweeper_task = asyncio.create_task(resumable_store.sweeper_loop())
+    _keepalive_task = asyncio.create_task(_keepalive_loop()) 
     try:
         yield
     finally:
-        for _t in (_probe_task, _sweeper_task):
+        for _t in (_probe_task, _sweeper_task, _keepalive_task):
             if not _t.done():
                 _t.cancel()
         resumable_store.cancel_all_pumps()
@@ -973,6 +1009,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             </div>
 
             <div class="set-row">
+              <span class="set-lbl">Render 自身防休眠保活 <span class="code-tag">keep-alive</span><span class="helpq" onclick="hlp(this,'h_ka')">?</span></span>
+              <label class="switch"><input type="checkbox" id="ka_enabled" onchange="autoFillKeepAliveUrl()"><span class="slider"></span></label>
+            </div>
+            <div id="h_ka" class="helpbox">
+              免费 Render 实例 15 分钟无公网流量会自动休眠。开启后，后台会定时向填写的<b>自身公网 URL</b> 发起轻量心跳，流量经过 Render 网关重置倒计时，实现免第三方外部 Cron 的自保活。
+            </div>
+            <div class="set-row">
+              <span class="set-lbl text-muted" style="font-size:12.5px">└ 公网完整地址 (URL)</span>
+              <input id="ka_url" type="text" class="inp log" style="max-width:240px;font-size:12px;padding:4.5px 8px" placeholder="https://xxx.onrender.com">
+            </div>
+            <div class="set-row">
+              <span class="set-lbl text-muted" style="font-size:12.5px">└ 心跳间隔（秒，建议 300~600）</span>
+              <input id="ka_interval" type="number" step="60" min="60" class="inp inp-sm" value="300">
+            </div>
+            <div class="flex justify-end pt-1 pb-2">
+              <button class="btn-soft px-3 py-1 text-xs" onclick="saveKeepAlive()">💾 应用自保活配置</button>
+            </div>
+            <div class="border-b divider-line mb-2"></div>
+
+            <div class="set-row">
               <span class="set-lbl">假流式保活模式 <span class="code-tag">fake_streaming</span><span class="helpq" onclick="hlp(this,'h_fks')">?</span></span>
               <label class="switch"><input type="checkbox" id="fake_streaming"><span class="slider"></span></label>
             </div>
@@ -1191,14 +1247,50 @@ async function fetchStats(){
     renderChart(d.success||0, d.error||0, d.retries||0);
   }catch(e){}
 }
-async function fetchServerIp(){
-  try {
-    var res = await (await fetch('/api/server-ip')).json();
-    var el = $('server-ip-pill');
-    if(el && res.ip){
-      el.textContent = '🌐 ' + res.ip;
+
+// 自动填入当前打开仪表盘的 Origin 地址（例如 https://xxx.onrender.com）
+function autoFillKeepAliveUrl(){
+  var urlInput = $('ka_url');
+  if(!urlInput.value || urlInput.value.includes('localhost') || urlInput.value.includes('127.0.0.1')){
+    if(window.location.origin && !window.location.origin.includes('localhost')){
+      urlInput.value = window.location.origin;
     }
-  } catch(e){}
+  }
+}
+
+async function loadKeepAlive(){
+  try{
+    var d = await (await fetch('/api/keepalive')).json();
+    $('ka_enabled').checked = !!d.enabled;
+    $('ka_url').value = d.url || (window.location.origin.includes('localhost') ? '' : window.location.origin);
+    $('ka_interval').value = d.interval || 300;
+  }catch(e){}
+}
+
+async function saveKeepAlive(){
+  var payload = {
+    enabled: $('ka_enabled').checked,
+    url: $('ka_url').value.trim(),
+    interval: Number($('ka_interval').value) || 300
+  };
+  if(payload.enabled && !payload.url){
+    toast('❌ 请填写本项目的公网完整 URL');
+    return;
+  }
+  try{
+    var r = await fetch('/api/keepalive', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    if(r.ok){
+      toast('✅ 自保活配置已更新并生效');
+    } else {
+      toast('❌ 保存失败');
+    }
+  }catch(e){
+    toast('❌ 网络请求失败');
+  }
 }
 
 
@@ -1702,7 +1794,7 @@ try{
 $('project-input').addEventListener('input',function(e){ var v=e.target.value.trim(); var m=v.match(/[?&]project=([^&]+)/)||v.match(/\/projects\/([^\/]+)/); if(m) e.target.value=m[1]; });
 $('image_aspect_ratio').addEventListener('change', function(e){ curAR=e.target.value; });
 
-fetchStats(); setInterval(fetchStats,3000); loadRuntime(); loadParams(); loadExpressKeys(); fetchServerIp();
+fetchStats(); setInterval(fetchStats,3000); loadRuntime(); loadParams(); loadExpressKeys();loadKeepAlive();
 </script>
 </body>
 </html>
@@ -1769,6 +1861,27 @@ async def get_stats_api(_auth: bool = Depends(require_auth)):
 @app.get("/api/server-ip")
 async def get_server_ip_api(_auth: bool = Depends(require_auth)):
     return JSONResponse(content={"ip": SERVER_OUTBOUND_IP})
+
+class KeepAliveBody(BaseModel):
+    enabled: bool
+    url: str
+    interval: int = 300
+
+
+@app.get("/api/keepalive")
+async def get_keepalive_api(_auth: bool = Depends(require_auth)):
+    return JSONResponse(content=KEEPALIVE_CONFIG)
+
+
+@app.post("/api/keepalive")
+async def set_keepalive_api(
+    body: KeepAliveBody, _auth: bool = Depends(require_auth)
+):
+    KEEPALIVE_CONFIG["enabled"] = body.enabled
+    KEEPALIVE_CONFIG["url"] = body.url.strip()
+    KEEPALIVE_CONFIG["interval"] = max(60, body.interval)
+    return JSONResponse(content={"status": "success", "config": KEEPALIVE_CONFIG})
+
 
 class ModeSetting(BaseModel):
     mode: str

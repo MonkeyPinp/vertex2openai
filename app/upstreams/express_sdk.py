@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from functools import partial
 from typing import Any, Optional, Tuple
 
@@ -24,7 +25,7 @@ import model_capabilities as mc
 from runtime_state import app_state
 import config as app_config
 from schema_validation import SchemaValidationError, validate_request_schemas
-from synthetic_wrapper import create_sandbox_spec, inject_express_gen_config
+from synthetic_wrapper import create_sandbox_spec, inject_express_gen_config, supports_stream_fc_args
 
 
 def _normalize_model_name(model_name: str) -> tuple[str, bool]:
@@ -95,19 +96,50 @@ def _prefill_log(mode: str, prefill_text: str) -> str:
 
 
 _ENDPOINT_LOGGED = False
+_CLIENT_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
+_CLIENT_CACHE_MAX = 64
 
 
-def create_express_genai_client(api_key: str, http_options: Any = None) -> Any:
-    """按 Google 官方 Gemini Enterprise Agent Platform (Express Mode) 规范初始化 genai.Client。
+def _client_cache_key(api_key: str, http_options: Any = None) -> tuple:
+    base_url = getattr(http_options, "base_url", None) or app_config.VERTEX_BASE_URL or ""
+    timeout = getattr(http_options, "timeout", None) or 0
+    return (
+        api_key,
+        str(base_url),
+        int(timeout) if isinstance(timeout, (int, float)) else 0,
+        str(app_config.PROXY_URL or ""),
+        str(app_config.SSL_CERT_FILE or ""),
+    )
+
+
+def create_express_genai_client(
+    api_key: str,
+    http_options: Any = None,
+    *,
+    use_cache: bool = True,
+) -> Any:
+    """按 Google 官方 Gemini Enterprise Agent Platform (Express Mode) 规范初始化或复用 genai.Client。
     优先使用官方最新参数 enterprise=True，若运行环境为较旧版 google-genai SDK 则自动回退至等价的 vertexai=True。
+    默认按 Key 与网络配置缓存复用底层 HTTP 连接池，避免每次请求或 429 重试重复建立连接与 TLS 握手。
     """
+    cache_key = _client_cache_key(api_key, http_options) if use_cache else None
+    if cache_key is not None and cache_key in _CLIENT_CACHE:
+        _CLIENT_CACHE.move_to_end(cache_key)
+        return _CLIENT_CACHE[cache_key]
+
     kwargs: dict[str, Any] = {"api_key": api_key}
     if http_options is not None:
         kwargs["http_options"] = http_options
     try:
-        return genai.Client(enterprise=True, **kwargs)
+        client = genai.Client(enterprise=True, **kwargs)
     except TypeError:
-        return genai.Client(vertexai=True, **kwargs)
+        client = genai.Client(vertexai=True, **kwargs)
+
+    if cache_key is not None:
+        _CLIENT_CACHE[cache_key] = client
+        while len(_CLIENT_CACHE) > _CLIENT_CACHE_MAX:
+            _CLIENT_CACHE.popitem(last=False)
+    return client
 
 
 def _log_resolved_endpoint(client: Any) -> None:
@@ -224,10 +256,12 @@ class ExpressSDKUpstream(BaseUpstream):
         if sandbox_spec.enabled:
             _fake_on = bool(app_state.get_setting("fake_streaming", app_config.FAKE_STREAMING_ENABLED))
             _real_stream = bool(request_obj.stream and not _fake_on and not is_image_model)
-            inject_express_gen_config(gen_config_dict, sandbox_spec, enable_stream_fc_args=_real_stream)
+            _use_stream_fc = bool(_real_stream and supports_stream_fc_args(base_model_name))
+            inject_express_gen_config(gen_config_dict, sandbox_spec, enable_stream_fc_args=_use_stream_fc)
+            _mode_label = "真流式" if _real_stream else ("假流式·原生一元" if request_obj.stream else "非流式·原生一元")
             print(
-                f"🛡️ [抗截断] Express 通道已启用工具传输 | 工具={sandbox_spec.emit_tool_name}"
-                + (" | 流式参数分片=已启用" if _real_stream else "")
+                f"🛡️ [抗截断] Express 通道已启用工具传输 | 工具={sandbox_spec.emit_tool_name} | 模式={_mode_label}"
+                + (" | 流式参数分片=已启用" if _use_stream_fc else "")
             )
 
         prompt_func = partial(
@@ -244,6 +278,16 @@ class ExpressSDKUpstream(BaseUpstream):
             prefill_text=prefill_text,
         )
 
+        _resolved_tk_info = mc.resolve_thinking(
+            getattr(orig_request_obj, "model", None) or base_model_name,
+            orig_request_obj,
+            _inj_settings,
+            prefill_active=prefill_active,
+        )
+        _has_search_tool = bool(
+            any(isinstance(t, dict) and "google_search" in t for t in (gen_config_dict.get("tools") or []))
+        )
+
         return {
             "request_obj": request_obj,
             "base_model_name": base_model_name,
@@ -251,6 +295,9 @@ class ExpressSDKUpstream(BaseUpstream):
             "gen_config_dict": gen_config_dict,
             "prompt_func": prompt_func,
             "prefill_text": prefill_text,
+            "prefill_active": bool(prefill_active),
+            "has_search": _has_search_tool,
+            "thinking_resolved": _resolved_tk_info,
             "is_image_model": is_image_model,
             "sandbox_spec": sandbox_spec,
             "synthetic_tool_name": sandbox_spec.emit_tool_name if sandbox_spec.enabled else "",

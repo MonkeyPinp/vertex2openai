@@ -1,3 +1,50 @@
+## 2026-11-16 新增控制台「调用记录」全链路追踪面板 & 修复原生思考 Token 统计漏计
+
+### 1. 控制台「🖥️ 运行日志」新增二级切换「📋 调用记录」明细面板（`app/logger.py`、`app/api_helpers.py`、`app/upstreams/cookie_proxy.py`、`app/main.py`）
+- **环形内存队列（`CallRecorder`）**：线程安全保留最近 200 条请求级调用摘要（自动淘汰最旧记录，零磁盘 I/O 开销），并通过 `/api/stats` 的 `records_version` 版本号驱动前端按需增量拉取（无新请求时零重绘、不打断已展开详情行）。
+- **精准区分标准模式与 Cookie 模式、拆分「入 / 思 / 正」三项 Token 与 `tok/s` 测速**：
+  - **Express 标准模式**：精确提取 Google 官方 `usage_metadata` 的 `prompt_token_count`（入）、`thoughts_token_count`（原生思考）与 `candidates_token_count`（正文输出），同时修复原概览页与日志漏计 `thoughts_token_count` 的问题；
+  - **Studio (Cookie) 模式**：针对私有 `batchGraphql` 不回传 `usageMetadata` 的特性，诚实标注 `Cookie 无回传` 并附带实际正文字数；
+  - **剥离重试耗时的纯速度算法**：真流式下基于上游首个模型 Token 到达时刻精确记录**真实首字响应时间（TTFT）**与**首字到流结束的纯吐字耗时**，计算真实流式 `tok/s`；假流式与非流式（原生一元整包返回）展示整包耗时与等效均速 `≈ xx tok/s`。
+- **精简凭证与状态徽章 + 点击展开重试/错误轨迹**：
+  - 支持 `全部 / 成功 / 失败` 三档筛选；自动高亮 `⚠️ 达上限截断`（`finish_reason=length`）；
+  - 成功时仅简洁展示最终命中的单一凭证（如 `Key #3` 或 `🍪 Cookie`），多凭证耗尽失败时汇总为 `试 N 凭证均败（止于 Key #X）`，点击任意行即可展开完整退避轨迹与错误诊断。
+
+---
+
+## 2026-11-14 根治长回复流式 O(N²) 帧膨胀变慢、弱网续传缓冲深度加固与原教旨抗截断升级
+
+### 0. 根治酒馆长回复流式「越写越慢」SSE 帧膨胀（降低 30~100 倍带宽与内存占用）
+- **问题根因**：Express 真流式 `convert_chunk_to_openai` 原先在**每一个普通增量 token 帧**的 `delta.extra_content.google.ordinary_parts` 中都重复携带从第 1 个字累积至今的全部正文列表，且 `json.dumps` 未启用 `ensure_ascii=False`（每个汉字转义为 `\uXXXX` 占 6 字节），导致 1.2 万字回复的 SSE 响应体平方级膨胀至 **9~15 MB**，并同步撑爆 `ResumableStore` 内存缓冲。
+- **收尾单发拓扑 + 相邻分片合并 + 原生 UTF-8 序列化**：
+  - Express 与 Studio 双通道真流式普通吐字帧/思考帧**彻底剥离 `extra_content`**，仅在收尾帧（`finish_reason` 发出时，含尾窗冲刷保底帧）或携带真实 `tool_calls` 帧时发送唯一一次 `extra_content`；假流式亦统一移至收尾帧发送；
+  - `ToolCallIndexer.record_ordinary_part` 与 Studio `_append_merged_ordinary_meta` 自动将相邻同类型（`text` / `thought`）增量合并为单个紧凑元素，避免上千碎字典膨胀；全链路 SSE 启用 `ensure_ascii=False`。
+- **弱网可靠续传缓冲（`app/resumable.py`、`app/routes/chat_api.py`）四处并发与内存漏洞修复**：
+  1. **修复同 `stream_id` 重试竞态误删新后台泵任务**：`register_pump` 的 `done_callback` 增加任务身份核验（`self._pumps.get(sid) is done_task`），`_cancel_if_abandoned` 与 `CancelledError` 清理增加缓冲区实例身份核验（`is buf`），彻底杜绝旧取消回调误杀新发起的重试流；
+  2. **修复半截断流残次品锁死 30 分钟无法重Roll的 Bug**：新增 `saw_midstream_error` 标记（补齐 `[Studio API 错误]` 识别）——若流在中途断网报错，带 `Last-Event-ID` / `resume_from` 的断线续传仍可拉取剩余帧，而酒馆用户直接重Roll（`start=0`）时自动丢弃残次缓冲并重新请求上游；
+  3. **已签收缓冲快速回收与 64MB 全局内存软顶**：客户端已完整收到 `[DONE]`（`fully_delivered=True`）的缓冲在 60 秒后即由清理器释放，不再傻留 30 分钟；`_evict_locked` 优先淘汰已签收缓冲并增加 64MB 总字节上限保护。
+
+### 1. 纯正假流式 / 非流式回归 + 有序双必填字段（`content` + `done`）协议级防未闭合
+- **保留原教旨上游一元调用**：
+  - **Express 假流式与非流式** 100% 调用 Google 原生一元 `client.aio.models.generate_content`（严禁混入 `stream_function_call_arguments`），由上游一次性完整生成返回，避免流式逐块审查导致的半路敏感词截断；仅在**真流式**下启用 `generate_content_stream` + `stream_function_call_arguments`；
+  - **Studio (Cookie) 假流式与非流式** 保持整包 `client.post` 一次性取回且不传 `streamFunctionCallArguments`。
+- **有序双必填字段（`content` + `done`）带外收敛机制（`build_emit_tool_declaration`）**：
+  - 将 `compose_reply` 从孤立单字段升级为静态固定的 `{"content": string, "done": boolean}` + `propertyOrdering: ["content", "done"]`（100% 保持 Vertex 隐式前缀缓存命中）；
+  - **治本防未闭合与防尾部幻觉**：Google 受限解码状态机（FSM）强制模型在写完 `content` 后必须闭合双引号并输出 `, "done": true}`，为模型注意力提供确定性的结构出口台阶，彻底消除单字段下在非流式/假流式/流式中把外层括号幻觉进 `content` 或卡在字符串内未闭合的问题；
+  - 真流式下网关一旦观测到 `$.done` 路径信号即确定 `content` 已协议级闭合，立即封口执行尾锚定检查，无需猜任何酒馆预设标签。
+
+### 2. Gemini 4 模型级非流式 / 假流式 `max_output_tokens` 精准限幅与官方 SDK 规范对齐
+- **精准区分 `4-hydrogen` (64K) 与 `4-argon` / `4-carbon` (32K)（`clamp_max_output_tokens`）**：
+  - 在非流式与假流式（一元 `generateContent`）下，`gemini-4-hydrogen` 上限为 `65536`（64K），而 `gemini-4-argon`、`gemini-4-carbon` 等其他 Gemini 4 模型自动将超出 `32768` 的 `max_output_tokens` 安全夹紧至 `32768`（32K），防止酒馆前端滑块拉满 64K 触发上游 400 超限报错或撞硬顶未闭合。
+- **官方 `streamFunctionCallArguments` 支持矩阵对齐**：真流式下对 Gemini 3+ / 4+ 文本模型（含 `3.5-flash-lite`）开启分片，对官方明确不支持的 `gemini-3.1-flash-lite` 与生图模型自动禁用，并支持客户端工具并存与协议报错自动剥离重试。
+- **边界修复**：修复 `is_gemini_response_valid` 预填充括号续写误判与空 `compose_reply` 放行 Bug；补齐短回复尾窗冲刷时的 `thought_signature` 保留（`pop_synth_signature`）；修复 Studio 顶层 GraphQL `errors` 解析及假流式/非流式降级时漏剥离 `compose_reply` 控制指令的问题。
+
+### 3. 移除破坏前缀缓存的随机注释注入 & 两档快速轮换退避策略
+- **彻底移除 `_build_retry_gen_config` 随机 HTML 注释加盐**：保持所有重试请求提示词 100% 纯净无扰，同时完整保留 `genai.Client` 的 `_CLIENT_CACHE` 连接池复用以节省容器内存、以及 `express_location=global` 默认路由。
+- **适配快速模式公共池高频 429 的两档退避（`_compute_smart_retry_wait`）**：不设跨请求长冷却禁闭、不强绑单 Key，保持清爽轮询；单次请求内切换到本轮尚未试过的另一把凭证时仅等 `0.3 ~ 0.6s` 立即换号敲门，所有可用凭证试满一整轮（或仅单凭证）时再按控制台 `retry_backoff_seconds`（带 `0.8 ~ 1.2` 随机错峰抖动）退避进入下一轮。
+
+---
+
 ## 2026-11-12 抗截断词法状态机重构、思考签名全链路修复与 Gemini 4 系列规则精简
 
 ### 0. 新增 `gemini-4-hydrogen`、`XHIGH` 第四思考档位与 64K 全模式输出适配
